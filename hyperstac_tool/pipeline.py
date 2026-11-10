@@ -371,3 +371,56 @@ def stage_qc(src: ImageSource, run_dir: Path, panel: dict, mask: dict, n_montage
     log_decision(run_dir, "qc", "tiles", ["qc/mask_and_tiles.png", "qc/channel_tile_stats.csv",
                  "qc/tile_montage.png"], f"montage channels {rgb}; seed {seed}")
     return {"rgb": rgb, "n_montage": len(sel)}
+
+
+# ---------------------------------------------------------------------------
+# Channel subset of an existing run (exact pixels, no re-read of the source image)
+def derive_channel_subset(src_run: Path, dst_run: Path, channels: list[str]) -> dict:
+    """Build a new run whose tiles are the given channels sliced from src_run's tiles.
+    Tile grid, mask and scaling are identical by construction, so two encoders trained
+    on the two runs differ only in the channel set."""
+    import shutil
+
+    panel = json.loads((src_run / "panel.json").read_text())
+    names = panel["encoder_channels"]
+    missing = [c for c in channels if c not in names]
+    if missing:
+        raise KeyError(f"channels not in source panel: {missing}")
+    keep = [names.index(c) for c in channels]
+    (dst_run / "tiles").mkdir(parents=True, exist_ok=True)
+    for f in ("inspect_report.json", "channels.csv", "scaling_params.json", "mask_params.json",
+              "tissue_mask_small.npy"):
+        shutil.copyfile(src_run / f, dst_run / f)
+    shutil.copyfile(src_run / "tiles" / "tile_index.csv", dst_run / "tiles" / "tile_index.csv")
+    new_panel = dict(panel)
+    new_panel.update({
+        "encoder_channels": channels,
+        "encoder_indices": [panel["encoder_indices"][k] for k in keep],
+        "n_encoder_channels": len(channels),
+        "dropped": [n for n in names if n not in channels] + panel.get("dropped", []),
+        "derived_from_run": str(src_run),
+    })
+    _write_json(dst_run / "panel.json", new_panel)
+    n_shards = 0
+    for f in sorted((src_run / "tiles").glob("shard_*.npy")):
+        if ".tmp" in f.name:
+            continue
+        out = dst_run / "tiles" / f.name
+        a = np.load(f, mmap_mode="r")
+        if out.exists() and _npy_shape(out) == (a.shape[0], a.shape[1], a.shape[2], len(keep)):
+            n_shards += 1
+            continue
+        sub = np.ascontiguousarray(a[..., keep])
+        del a
+        tmp = out.with_name(out.stem + ".tmp.npy")
+        np.save(tmp, sub)
+        if _npy_shape(tmp) != sub.shape:
+            raise IOError(f"{tmp.name} failed readback")
+        os.replace(tmp, out)
+        n_shards += 1
+    summ = json.loads((src_run / "tiles_summary.json").read_text())
+    summ.update({"derived_from_run": str(src_run), "channels": channels})
+    _write_json(dst_run / "tiles_summary.json", summ)
+    log_decision(dst_run, "channel subset", str(src_run), ["tiles/shard_*.npy", "panel.json"],
+                 f"{len(channels)} channels sliced from {len(names)}: {channels}")
+    return {"n_shards": n_shards, "channels": channels}

@@ -61,9 +61,65 @@ the same error repeats twice. This matters on LMSK56386, which throws sporadic
 `tiles_summary.json`, `qc/mask_and_tiles.png`, `qc/tile_montage.png`, `qc/channel_tile_stats.csv`,
 `DECISION_LOG.md`, `attempts.log`.
 
+## GPU stages (WSL2)
+
+Training, embedding and clustering run in WSL2 with GPU TensorFlow 2.21 and the legacy
+Keras 2 API (`tf_keras`), which the reference `VICReg/` code was written for.
+
+One-time setup inside WSL (no sudo needed):
+
+```
+python3 -m venv --without-pip ~/hyperstac_tf
+curl -sSLo /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && ~/hyperstac_tf/bin/python /tmp/get-pip.py
+~/hyperstac_tf/bin/python -m pip install "tensorflow[and-cuda]" tf-keras pandas scanpy leidenalg igraph h5py matplotlib scikit-image
+```
+
+`wsl_env.sh` puts the pip-installed NVIDIA libraries on `LD_LIBRARY_PATH`. Without it,
+TensorFlow 2.21 silently runs on CPU (it cannot dlopen `libcusolver.so.11`).
+
+```
+# single-slide demo: both channel sets, both folds, detached, crash-resuming
+python -m hyperstac_tool subset runs/tonsil31_all32 --out runs/tonsil31_paper8 --channels paper8   # Windows venv
+setsid nohup bash run_train_queue.sh runs/tonsil31_paper8:0 runs/tonsil31_all32:0 runs/tonsil31_paper8:1 runs/tonsil31_all32:1 > runs/train_queue.log 2>&1 &
+setsid nohup bash run_post.sh runs/tonsil31_paper8 runs/tonsil31_all32 > runs/post.log 2>&1 &
+```
+
+| Module | What it does | Outputs (`<run>/ssl/fold-<k>/`) |
+|---|---|---|
+| `folds.py` | Paper splits patients 2-fold. One slide has one patient, so `stripes` mode alternates 10-tile (1.1 mm) vertical stripes. Demonstration only. | `<run>/folds.csv`, `folds_note.txt` |
+| `train_vicreg.py` | Reference `VICReg` loss, `custom_augment_multiplex`, `WarmUpCosine` unchanged; ResNet-50 from scratch; checkpoint every epoch, resumes with optimizer state | `train_params.json`, `training_log.csv`, `ckpt/`, `encoder_weights_0.weights.h5`, `DONE` |
+| `embed.py` | Encoder + global average pooling -> 2048-d per tile | `embeddings.npz`, `embeddings_info.json` |
+| `cluster.py` | PCA 50 -> kNN graph -> Leiden (res 1) on training tiles; `ingest` for held-out tiles; marker intensity per SPC; figures | `spc/tile_spc.csv`, `spc_sizes.csv`, `spc_marker_intensity(_z).csv`, `spc_qc.json`, `umap_spc.png`, `spatial_spc_map.png`, `spc_marker_heatmap.png`, `spc_gallery.png` |
+
+### Deviations from the paper (recorded in `train_params.json` / `spc_qc.json`)
+
+- **Batch size 48** (paper 256). Batch 64 runs out of memory on the 16 GB RTX 5000 Ada:
+  the 3 x 8192 projector and its 8192 x 8192 covariance terms dominate.
+- **Encoder** from `tf.keras.applications.ResNet50(weights=None)` rather than the
+  `image-classifiers` package (same ResNet-50 v1 topology; that package predates Keras 3).
+- **Validation loss** on 512 random held-out tiles, not all of them.
+- **Leiden** from scanpy/igraph instead of rapids_singlecell on GPU.
+- **Held-out assignment**: `ingest`, as in the reference. On synthetic, perfectly separable
+  embeddings it mislabeled 7.5% of held-out points while an exact 15-NN vote in the same PCA
+  space was 100% correct. Both are saved (`spc`, `spc_exact_knn`) and their agreement is in
+  `spc_qc.json` as `heldout_ingest_vs_exact_knn_agreement`.
+- **Interpretation** by marker intensity per SPC (the paper's Hallmarks approach); a bare
+  QPTIFF has no cell segmentation for cell-type densities.
+
+### Known issues
+
+- In WSL, TensorFlow 2.21 aborts (`free(): double free`) whenever the GPU is hidden
+  (`CUDA_VISIBLE_DEVICES=""`, `-1`, or an invalid index). Embedding/clustering cannot run on
+  CPU while training holds the GPU; `run_post.sh` waits for the training queue instead.
+- Fixed 2026-11-10: `run_train_queue.sh` used to match TensorFlow's harmless oneDNN banner
+  ("round-off errors") as its "identical error", so two crashes of any kind could stop the
+  queue. Do not edit a queue script while it runs: bash reads scripts incrementally.
+- Results of the first full run: `DEMO_TONSIL31.md`.
+- Speed: about 50 s per epoch at batch 48 (2,764 training tiles); CPU-side augmentation is
+  the bottleneck (GPU mostly idle). 100 epochs is about 85 minutes per encoder.
+
 ## Not done yet
 
-- Shard loader for `ssl-training.py` (the reference code expects one `.npy` per tile).
-- TMA dearraying and core -> patient table.
-- Training / embedding / Leiden / interpretation stages; GPU host decision.
-- Xenium and OME-TIFF adapters are written but only QPTIFF has been run end to end.
+- TMA dearraying and core -> patient table; `patient` fold mode needs a patient column.
+- Xenium and OME-TIFF adapters are written; only QPTIFF has been run end to end.
+- Cell-segmentation import (QuPath / inForm / Xenium cells) for cell-type density per SPC.

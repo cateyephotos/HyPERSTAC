@@ -31,13 +31,23 @@ def _parse(argv=None):
     b.add_argument("--scaling", default="auto", choices=["auto", "none", "percentile"])
     b.add_argument("--max-rows", type=int, default=None, help="limit tile rows (smoke tests)")
     b.add_argument("--shard-size", type=int, default=256)
+    c = sub.add_parser("subset", help="new run with a channel subset of an existing run's tiles")
+    c.add_argument("src_run")
+    c.add_argument("--out", required=True)
+    c.add_argument("--channels", default="paper8")
     return ap.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = _parse(argv)
-    from .sources import detect_and_open
     from . import pipeline as P
+
+    if args.cmd == "subset":
+        chans = PAPER_8 if args.channels == "paper8" else [c.strip() for c in args.channels.split(",")]
+        print(P.derive_channel_subset(Path(args.src_run), Path(args.out), chans))
+        return 0
+
+    from .sources import detect_and_open
 
     src = detect_and_open(args.input)
     if args.cmd == "inspect":
