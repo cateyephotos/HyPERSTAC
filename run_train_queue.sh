@@ -13,12 +13,18 @@ for job in "$@"; do
   out="$run/ssl/fold-$fold"; mkdir -p "$out"
   if [ -f "$out/DONE" ]; then echo "$(date -Iseconds) skip $job (done)"; continue; fi
   last=""
+  job_t0=$(date +%s)   # total time spans every attempt, failed ones included (report this, not the last attempt)
   for attempt in $(seq 1 "${MAX_ATTEMPTS:-6}"); do
     echo "$(date -Iseconds) start $job attempt $attempt"
     python -m hyperstac_tool.train_vicreg --run "$run" --fold "$fold" --epochs "$EPOCHS" \
       --batch-size "$BATCH" --tile-cache "$CACHE" >> "$out/train_stdout.log" 2>&1
     rc=$?
-    if [ $rc -eq 0 ] && [ -f "$out/DONE" ]; then echo "$(date -Iseconds) done $job"; break; fi
+    if [ $rc -eq 0 ] && [ -f "$out/DONE" ]; then
+      mins=$(( ($(date +%s) - job_t0) / 60 ))
+      echo "$(date -Iseconds) done $job attempts=$attempt total_minutes=$mins"
+      printf '{"attempts": %s, "total_minutes": %s}\n' "$attempt" "$mins" > "$out/wall_time.json"
+      break
+    fi
     # Last real error line. Exclude TensorFlow's oneDNN banner, which mentions
     # "round-off errors" and would make every crash look identical.
     err="$(grep -E 'Error|OOM|Segmentation fault|Aborted|double free' "$out/train_stdout.log" \

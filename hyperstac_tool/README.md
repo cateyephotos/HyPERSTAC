@@ -89,7 +89,16 @@ setsid nohup bash run_post.sh runs/tonsil31_paper8 runs/tonsil31_all32 > runs/po
 | `folds.py` | Paper splits patients 2-fold. One slide has one patient, so `stripes` mode alternates 10-tile (1.1 mm) vertical stripes. Demonstration only. | `<run>/folds.csv`, `folds_note.txt` |
 | `train_vicreg.py` | Reference `VICReg` loss, `custom_augment_multiplex`, `WarmUpCosine` unchanged; ResNet-50 from scratch; checkpoint every epoch, resumes with optimizer state | `train_params.json`, `training_log.csv`, `ckpt/`, `encoder_weights_0.weights.h5`, `DONE` |
 | `embed.py` | Encoder + global average pooling -> 2048-d per tile | `embeddings.npz`, `embeddings_info.json` |
-| `cluster.py` | PCA 50 -> kNN graph -> Leiden (res 1) on training tiles; `ingest` for held-out tiles; marker intensity per SPC; figures | `spc/tile_spc.csv`, `spc_sizes.csv`, `spc_marker_intensity(_z).csv`, `spc_qc.json`, `umap_spc.png`, `spatial_spc_map.png`, `spc_marker_heatmap.png`, `spc_gallery.png` |
+| `cluster.py` | PCA 50 -> kNN graph -> Leiden (res 1) on training tiles; `ingest` for held-out tiles; marker intensity per SPC; near-blank channel check; figures | `spc/tile_spc.csv`, `spc_sizes.csv`, `spc_marker_intensity(_z).csv`, `channel_coverage.csv`, `spc_qc.json` (incl. `near_blank_channels`), `umap_spc.png`, `spatial_spc_map.png` (single panel, legend), `fold_stripes_map.png`, `spc_marker_heatmap.png` (near-blank channels left out), `spc_gallery.png` |
+
+Training also writes `training_summary.json` (training and validation loss first / last / min,
+and `validation_improved`), and the queue writes `wall_time.json` (attempts, total minutes
+across every attempt). Present both losses, and the total time, never the last attempt's time.
+
+**Figure conventions (fixed 2026-11-11 after the tonsil deck review):** every figure says
+"Cluster n" (never "SPC n"); the slide map has a legend; a channel above zero in fewer than 5%
+of tissue pixels is listed as near blank and left out of the heatmap, because cluster z-scores
+make empty channels look enriched (CD21 on the tonsil: means 0.0-0.1 of 255, z = 2.7).
 
 ### Deviations from the paper (recorded in `train_params.json` / `spc_qc.json`)
 

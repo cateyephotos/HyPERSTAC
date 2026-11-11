@@ -42,9 +42,34 @@ def tile_channel_means(x: np.ndarray, chunk: int = 256) -> np.ndarray:
     return out
 
 
+NEAR_BLANK_FRACTION = 0.05  # channel above zero in < 5% of tissue pixels -> not usable to name clusters
+
+
+def channel_coverage(x: np.ndarray, names: list, chunk: int = 256) -> pd.DataFrame:
+    """Per channel: fraction of tissue pixels above zero, and mean over tissue pixels.
+
+    Z-scores across clusters make a nearly empty channel look strongly enriched
+    (tonsil demo 2026-11: CD21 cluster means 0.0-0.1 of 255 scored z = 2.7), so
+    near-blank channels are flagged here and left out of the marker heatmap."""
+    nz = np.zeros(len(names)); tot = np.zeros(len(names)); n = 0
+    for s in range(0, len(x), chunk):
+        b = x[s:s + chunk]
+        tissue = b.max(axis=-1) > 0
+        sel = b[tissue]                      # (pixels, C)
+        nz += (sel > 0).sum(axis=0); tot += sel.astype(np.float64).sum(axis=0); n += len(sel)
+    cov = pd.DataFrame({"channel": names, "fraction_nonzero": nz / max(n, 1), "mean": tot / max(n, 1)})
+    cov["near_blank"] = cov["fraction_nonzero"] < NEAR_BLANK_FRACTION
+    return cov
+
+
 def _palette(n):
-    cmap = plt.get_cmap("tab20" if n <= 20 else "gist_ncar")
-    return [cmap(i / max(n - 1, 1)) if n > 20 else cmap(i) for i in range(n)]
+    """Up to 40 distinct colors (tab20 + tab20b). The earlier gist_ncar fallback for >20
+    clusters faded to near-white at the top end (Cluster 21 invisible on the tonsil map)."""
+    cols = list(plt.get_cmap("tab20").colors) + list(plt.get_cmap("tab20b").colors)
+    if n > len(cols):
+        cmap = plt.get_cmap("hsv")
+        return [cmap(i / n) for i in range(n)]
+    return cols[:n]
 
 
 def main(argv=None) -> int:
@@ -147,8 +172,16 @@ def main(argv=None) -> int:
     z = (per_spc - per_spc.mean()) / per_spc.std(ddof=0).replace(0, 1)
     z.round(3).to_csv(odir / "spc_marker_intensity_z.csv")
 
+    cov = channel_coverage(x, names)
+    cov.round(5).to_csv(odir / "channel_coverage.csv", index=False)
+    near_blank = cov.loc[cov["near_blank"], "channel"].tolist()
+    qc["near_blank_channels"] = near_blank
+    qc["near_blank_rule"] = f"fraction of tissue pixels above zero < {NEAR_BLANK_FRACTION}"
+    (odir / "spc_qc.json").write_text(json.dumps(qc, indent=2))
+    usable = [c for c in names if c not in near_blank]
+
     pal = _palette(n_spc)
-    title = f"{run.name} fold {args.fold}: {n_spc} SPCs"
+    title = f"{run.name} fold {args.fold}: {n_spc} clusters"
 
     # UMAP
     fig, axs = plt.subplots(1, 2, figsize=(13, 6))
@@ -176,30 +209,33 @@ def main(argv=None) -> int:
     stripe = np.ones((H, W, 3))
     for r, c, s in zip(tiles["grid_row"], tiles["grid_col"], tiles["split"]):
         stripe[r, c] = (0.25, 0.45, 0.85) if s == "train" else (0.95, 0.55, 0.15)
-    fig, axs = plt.subplots(1, 2, figsize=(10, 8))
-    axs[0].imshow(img, interpolation="nearest")
-    for k in range(n_spc):
-        rr, cc = np.where((tiles["spc"] == k).to_numpy())[0], None
-        sel = tiles[tiles["spc"] == k]
-        if len(sel):
-            axs[0].text(sel["grid_col"].median(), sel["grid_row"].median(), str(k), fontsize=6, ha="center")
-    axs[0].set_title("SPC per tile (111 um squares)")
-    axs[1].imshow(stripe, interpolation="nearest")
-    axs[1].set_title("blue = training stripes, orange = held-out stripes")
-    for a in axs:
-        a.axis("off")
-    fig.suptitle(title)
+    # Single-panel map with a legend (a deck must never need to crop panels or guess colors);
+    # the fold-stripe map is a separate file.
+    from matplotlib.patches import Patch
+    fig, ax = plt.subplots(figsize=(9, 8))
+    ax.imshow(img, interpolation="nearest"); ax.axis("off")
+    ax.set_title(f"{title}: cluster of each 111 um tile")
+    ax.legend(handles=[Patch(color=pal[k], label=f"Cluster {k}") for k in range(n_spc)],
+              loc="center left", bbox_to_anchor=(1.01, 0.5), ncol=2 if n_spc > 12 else 1,
+              fontsize=9, frameon=False)
     fig.savefig(odir / "spatial_spc_map.png", dpi=170, bbox_inches="tight")
     plt.close(fig)
+    fig, ax = plt.subplots(figsize=(6, 8))
+    ax.imshow(stripe, interpolation="nearest"); ax.axis("off")
+    ax.set_title(f"{run.name} fold {args.fold}: blue = training stripes, orange = held-out stripes", fontsize=9)
+    fig.savefig(odir / "fold_stripes_map.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
-    # marker heatmap
-    fig, ax = plt.subplots(figsize=(max(6, 0.35 * len(names) + 2), 0.35 * n_spc + 2))
-    im = ax.imshow(z.to_numpy(), cmap="RdBu_r", vmin=-2.5, vmax=2.5, aspect="auto")
-    ax.set_xticks(range(len(names)), names, rotation=90, fontsize=7)
-    ax.set_yticks(range(n_spc), [f"SPC {k} (n={int(cnt.loc[k, 'train'] + cnt.loc[k, 'heldout'])})"
-                                 for k in range(n_spc)], fontsize=7)
-    fig.colorbar(im, ax=ax, label="z-score across SPCs of mean tile intensity")
-    ax.set_title(title + " - marker content")
+    # marker heatmap (near-blank channels left out; they stay in the CSVs)
+    zu = z[usable]
+    fig, ax = plt.subplots(figsize=(max(6, 0.38 * len(usable) + 2.5), 0.38 * n_spc + 2))
+    im = ax.imshow(zu.to_numpy(), cmap="RdBu_r", vmin=-2.5, vmax=2.5, aspect="auto")
+    ax.set_xticks(range(len(usable)), usable, rotation=90, fontsize=9)
+    ax.set_yticks(range(n_spc), [f"Cluster {k} (n={int(cnt.loc[k, 'train'] + cnt.loc[k, 'heldout'])})"
+                                 for k in range(n_spc)], fontsize=9)
+    fig.colorbar(im, ax=ax, label="z-score across clusters of mean tile intensity")
+    omitted = f" | left out (near blank): {', '.join(near_blank)}" if near_blank else ""
+    ax.set_title(title + " - marker content" + omitted, fontsize=10)
     fig.savefig(odir / "spc_marker_heatmap.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -229,7 +265,7 @@ def main(argv=None) -> int:
                 a.imshow(np.clip(x[picks[k][j]][..., ch].astype(np.float32) / hi, 0, 1))
             else:
                 a.axis("off")
-        axs[k, 0].set_ylabel(f"SPC {k}", fontsize=8)
+        axs[k, 0].set_ylabel(f"Cluster {k}", fontsize=8)
     fig.suptitle(f"{title} - held-out tiles (R={rgb[0]}, G={rgb[1]}, B={rgb[2]})", fontsize=9)
     fig.savefig(odir / "spc_gallery.png", dpi=110, bbox_inches="tight")
     plt.close(fig)

@@ -216,6 +216,25 @@ def main(argv=None) -> int:
                   validation_data=ds_val, verbose=2,
                   callbacks=[EpochCheckpoint(manager, out / "progress.json", out / "training_log.csv")])
 
+    # Training loss alone overstates learning: on the tonsil demo it fell 220 -> 38.9 while the
+    # held-out validation loss barely moved (48 -> 43-51). Always report both.
+    log_csv = out / "training_log.csv"
+    if log_csv.exists():
+        lg = pd.read_csv(log_csv)
+        summ = {"epochs_logged": int(len(lg))}
+        for col in ("loss", "val_loss", "inv_loss", "val_inv_loss", "var_loss", "val_var_loss"):
+            if col in lg:
+                summ[col] = {"first": float(lg[col].iloc[0]), "last": float(lg[col].iloc[-1]),
+                             "min": float(lg[col].min()),
+                             "median_last10": float(lg[col].tail(10).median())}
+        if "val_loss" in summ:
+            v = summ["val_loss"]
+            summ["validation_improved"] = bool(v["median_last10"] < v["first"] * 0.95)
+            summ["note"] = ("validation loss fell by more than 5%" if summ["validation_improved"] else
+                            "validation loss did not fall by 5%: do not present training loss alone as evidence of learning")
+        (out / "training_summary.json").write_text(json.dumps(summ, indent=2))
+        print(f"[train] summary: {summ.get('note', '')}", flush=True)
+
     encoder.save_weights(str(out / "encoder_weights_0.weights.h5"))
     projector.save_weights(str(out / "projector_weights_0.weights.h5"))
     (out / "DONE").write_text(dt.datetime.now().isoformat(timespec="seconds"))

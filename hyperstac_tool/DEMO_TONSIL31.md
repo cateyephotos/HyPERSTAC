@@ -53,6 +53,30 @@ Next tests: (1) compare SPC composition within matched anatomy between the top a
 halves of the slide; (2) rerun with per-tile or per-region intensity normalization and see
 which clusters survive (a deviation from the paper that needs the defensibility gate).
 
+### Result of the gradient check (2026-11-10, `runs/tonsil31_demo_gradient_check.json`)
+
+| Check | Result |
+|---|---|
+| DAPI vs tile row (Spearman) | rho 0.29; median DAPI 71 (top half) vs 90 (bottom half), +27% |
+| Lineage markers in matched tissue, top vs bottom | CD20 65.7 vs 64.3 (B-rich tiles), CD3e 48.5 vs 51.1 (T-rich), Pan-CK 18.9 vs 19.1 (epithelium): equal |
+| DAPI in the same matched tissue, top vs bottom | 89 vs 113 (B-rich), 95 vs 117 (T-rich), 57 vs 63 (epithelium): bottom brighter |
+| SPC depends on slide half within matched tissue (Cramer's V, fold 0) | 0.51-0.61, against a shuffled-label 95th percentile of 0.12-0.19 |
+| SPC depends on DAPI tercile within matched tissue | V 0.46-0.61 |
+
+**Reading:** tiles of the same tissue type, with the same lineage-marker levels, are assigned
+to different SPCs depending on which half of the slide they sit in, and that split follows
+DAPI brightness. The encoders have learned a DAPI gradient across the slide (most likely
+staining or scanning, since lineage markers do not change) in addition to tissue
+architecture. A real top-bottom difference in nuclear density cannot be fully excluded from
+one slide, but it would not explain equal lineage-marker levels.
+
+**Consequence:** treat SPC differences on this slide as possibly technical. Before any
+biological reading, rerun with an intensity correction (e.g. DAPI flat-field / per-region
+normalization, or per-tile channel standardization) and repeat this check. That rerun changes
+what the encoder sees relative to the paper, so it goes through `/scientific-defensibility`
+first. For multi-slide cohorts the same mechanism would turn slide-to-slide staining
+differences into "SPCs", so this check belongs in the standard QC.
+
 CD21 and CD31 are nonzero in only ~2-3% of tile pixels on this slide, so z-scores for those
 two channels are driven by very small signals.
 
